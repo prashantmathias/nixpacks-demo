@@ -42,13 +42,13 @@ func main() {
 	}
 
 	// Read target-app source files
-	mainGoBytes, err := os.ReadFile("target-app/main.go")
+	mainTsBytes, err := os.ReadFile("target-app/main.ts")
 	if err != nil {
-		panic(fmt.Errorf("failed to read target-app/main.go: %w", err))
+		panic(fmt.Errorf("failed to read target-app/main.ts: %w", err))
 	}
-	dockerfileBytes, err := os.ReadFile("target-app/Dockerfile")
+	denoJsonBytes, err := os.ReadFile("target-app/deno.json")
 	if err != nil {
-		panic(fmt.Errorf("failed to read target-app/Dockerfile: %w", err))
+		panic(fmt.Errorf("failed to read target-app/deno.json: %w", err))
 	}
 
 	runID := uuid.New().String()[:8]
@@ -69,8 +69,8 @@ func main() {
 			Name: configMapName,
 		},
 		Data: map[string]string{
-			"main.go":    string(mainGoBytes),
-			"Dockerfile": string(dockerfileBytes),
+			"main.ts":   string(mainTsBytes),
+			"deno.json": string(denoJsonBytes),
 		},
 	}
 	_, err = clientset.CoreV1().ConfigMaps(namespace).Create(ctx, cm, metav1.CreateOptions{})
@@ -100,13 +100,22 @@ func main() {
 						{Name: "workspace-volume", MountPath: "/workspace"},
 					},
 				},
+				{
+					Name:       "nixpacks-plan",
+					Image:      "ubuntu:latest",
+					WorkingDir: "/workspace",
+					Command:    []string{"sh", "-c", "apt-get update && apt-get install -y curl && curl -sSL https://nixpacks.com/install.sh | bash && nixpacks build . -o ."},
+					VolumeMounts: []corev1.VolumeMount{
+						{Name: "workspace-volume", MountPath: "/workspace"},
+					},
+				},
 			},
 			Containers: []corev1.Container{
 				{
 					Name:  "kaniko",
 					Image: "gcr.io/kaniko-project/executor:latest",
 					Args: []string{
-						"--dockerfile=/workspace/Dockerfile",
+						"--dockerfile=/workspace/.nixpacks/Dockerfile",
 						"--context=dir:///workspace",
 						"--destination=" + imageName,
 					},
@@ -169,7 +178,7 @@ func main() {
 			break
 		} else if p.Status.Phase == corev1.PodFailed {
 			fmt.Println("-> Kaniko build FAILED!")
-			cmd := exec.Command("kubectl", "logs", podName, "-n", namespace)
+			cmd := exec.Command("kubectl", "logs", podName, "-n", namespace, "--all-containers")
 			out, _ := cmd.CombinedOutput()
 			fmt.Printf("Kaniko Logs:\n%s\n", string(out))
 			break
