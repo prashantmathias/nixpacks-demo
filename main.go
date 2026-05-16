@@ -191,13 +191,32 @@ func main() {
 		if !ok {
 			continue
 		}
-		if p.Status.Phase == corev1.PodSucceeded {
-			buildSuccess = true
-			fmt.Println("-> BuildKit build SUCCEEDED!")
-			break
-		} else if p.Status.Phase == corev1.PodFailed {
-			fmt.Println("-> BuildKit build FAILED!")
-			cmd := exec.Command("kubectl", "logs", podName, "-n", namespace, "--all-containers")
+
+		var builderStatus *corev1.ContainerStatus
+		for _, cs := range p.Status.ContainerStatuses {
+			if cs.Name == "builder" {
+				builderStatus = &cs
+				break
+			}
+		}
+
+		if builderStatus != nil && builderStatus.State.Terminated != nil {
+			if builderStatus.State.Terminated.ExitCode == 0 {
+				buildSuccess = true
+				fmt.Println("-> BuildKit build SUCCEEDED!")
+				break
+			} else {
+				fmt.Println("-> BuildKit build FAILED!")
+				cmd := exec.Command("kubectl", "logs", podName, "-c", "builder", "-n", namespace)
+				out, _ := cmd.CombinedOutput()
+				fmt.Printf("BuildKit Logs:\n%s\n", string(out))
+				break
+			}
+		}
+
+		if p.Status.Phase == corev1.PodFailed {
+			fmt.Println("-> BuildKit pod FAILED entirely!")
+			cmd := exec.Command("kubectl", "logs", podName, "--all-containers", "-n", namespace)
 			out, _ := cmd.CombinedOutput()
 			fmt.Printf("BuildKit Logs:\n%s\n", string(out))
 			break
