@@ -68,3 +68,12 @@ The orchestrator cleans up the `ConfigMap` and BuildKit build `Pod` automaticall
 kubectl delete deployment buildkit-app-<run-id>
 kubectl delete service buildkit-app-<run-id>-svc
 ```
+
+## Production Readiness
+
+While this prototype demonstrates a highly efficient, single-pod architecture with isolated daemons and native OCI metadata caching, **it is not completely ready for a strict production environment**. To adapt this setup for production use, consider the following required improvements:
+
+1.  **Security (Rootless BuildKit)**: Currently, the `buildkitd` daemon runs in `Privileged: true` mode. Strict Kubernetes environments (using Pod Security Standards or OPA) block privileged containers. You must transition to rootless BuildKit (`moby/buildkit:master-rootless`) with appropriate AppArmor/Seccomp profiles.
+2.  **Registry Authentication**: The orchestrator pushes to `ttl.sh` (a public, ephemeral registry). Production requires pushing to private registries (e.g., ECR, GCR, Docker Hub). You'll need to mount a Kubernetes Docker Registry Secret to the `builder` container at `~/.docker/config.json`.
+3.  **BuildKit Caching**: The current design loses its cache when the Pod terminates. Implement caching by having `buildctl` export the cache to a registry (`--export-cache` and `--import-cache`) or by mounting a `PersistentVolumeClaim` (PVC) to `/var/lib/buildkit`.
+4.  **Supply Chain Resiliency**: The `builder` dynamically installs `curl`, `nixpacks`, and `buildctl` at runtime. In production, use a custom, pre-baked Docker image that already contains these tools to improve reliability and reduce build times.
