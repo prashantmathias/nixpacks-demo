@@ -12,6 +12,7 @@ import (
 	"github.com/google/uuid"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/kubernetes"
@@ -52,12 +53,12 @@ func main() {
 	}
 
 	runID := uuid.New().String()[:8]
-	configMapName := fmt.Sprintf("kaniko-build-context-%s", runID)
-	podName := fmt.Sprintf("kaniko-builder-%s", runID)
-	imageName := fmt.Sprintf("ttl.sh/kaniko-proto-%s:1h", runID)
-	deploymentName := fmt.Sprintf("kaniko-app-%s", runID)
+	configMapName := fmt.Sprintf("buildkit-build-context-%s", runID)
+	podName := fmt.Sprintf("buildkit-builder-%s", runID)
+	imageName := fmt.Sprintf("ttl.sh/buildkit-proto-%s:1h", runID)
+	deploymentName := fmt.Sprintf("buildkit-app-%s", runID)
 
-	fmt.Printf("Starting Kaniko prototype run %s\n", runID)
+	fmt.Printf("Starting BuildKit prototype run %s\n", runID)
 	fmt.Printf("Image destination will be: %s\n", imageName)
 
 	ctx := context.Background()
@@ -82,47 +83,59 @@ func main() {
 		clientset.CoreV1().ConfigMaps(namespace).Delete(ctx, configMapName, metav1.DeleteOptions{})
 	}()
 
-	// 3. Launch Kaniko Pod
-	fmt.Println("-> Launching Kaniko Pod...")
+	// Helper function for pointer to bool
+	priv := true
+
+	// 3. Launch BuildKit Pod
+	fmt.Println("-> Launching BuildKit Pod...")
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: podName,
 		},
 		Spec: corev1.PodSpec{
 			RestartPolicy: corev1.RestartPolicyNever,
-			InitContainers: []corev1.Container{
+			Containers: []corev1.Container{
 				{
-					Name:  "copy-context",
-					Image: "alpine:latest",
-					Command: []string{"sh", "-c", "cp -L /workspace-cm/* /workspace/"},
+					Name:  "buildkitd",
+					Image: "moby/buildkit:latest",
+					SecurityContext: &corev1.SecurityContext{
+						Privileged: &priv,
+					},
+					VolumeMounts: []corev1.VolumeMount{
+						{Name: "buildkit-socket", MountPath: "/run/buildkit"},
+					},
+					Resources: corev1.ResourceRequirements{
+						Requests: corev1.ResourceList{
+							// Guaranteed CPU/memory floor for the daemon
+							corev1.ResourceCPU:    resource.MustParse("500m"),
+							corev1.ResourceMemory: resource.MustParse("512Mi"),
+						},
+					},
+				},
+				{
+					Name:       "builder",
+					Image:      "ubuntu:latest",
+					WorkingDir: "/workspace",
+					Command:    []string{"sh", "-c"},
+					Args: []string{
+						"apt-get update && apt-get install -y curl && " +
+							"curl -sSL https://nixpacks.com/install.sh | bash && " +
+							"curl -sSL https://github.com/moby/buildkit/releases/download/v0.12.5/buildkit-v0.12.5.linux-amd64.tar.gz | tar xz -C /usr/local/bin --strip-components=1 && " +
+							"cp -L -r /workspace-cm/* /workspace/ && " +
+							"nixpacks build . -o . && " +
+							"while ! buildctl --addr unix:///run/buildkit/buildkitd.sock debug workers; do sleep 1; done && " +
+							"buildctl --addr unix:///run/buildkit/buildkitd.sock build --frontend dockerfile.v0 --local context=/workspace --local dockerfile=/workspace/.nixpacks --output type=image,name=" + imageName + ",push=true",
+					},
 					VolumeMounts: []corev1.VolumeMount{
 						{Name: "workspace-cm", MountPath: "/workspace-cm"},
 						{Name: "workspace-volume", MountPath: "/workspace"},
+						{Name: "buildkit-socket", MountPath: "/run/buildkit"},
 					},
-				},
-				{
-					Name:       "nixpacks-plan",
-					Image:      "ubuntu:latest",
-					WorkingDir: "/workspace",
-					Command:    []string{"sh", "-c", "apt-get update && apt-get install -y curl && curl -sSL https://nixpacks.com/install.sh | bash && nixpacks build . -o ."},
-					VolumeMounts: []corev1.VolumeMount{
-						{Name: "workspace-volume", MountPath: "/workspace"},
-					},
-				},
-			},
-			Containers: []corev1.Container{
-				{
-					Name:  "kaniko",
-					Image: "gcr.io/kaniko-project/executor:latest",
-					Args: []string{
-						"--dockerfile=/workspace/.nixpacks/Dockerfile",
-						"--context=dir:///workspace",
-						"--destination=" + imageName,
-					},
-					VolumeMounts: []corev1.VolumeMount{
-						{
-							Name:      "workspace-volume",
-							MountPath: "/workspace",
+					Resources: corev1.ResourceRequirements{
+						Requests: corev1.ResourceList{
+							// Guaranteed CPU/memory floor for the control process
+							corev1.ResourceCPU:    resource.MustParse("500m"),
+							corev1.ResourceMemory: resource.MustParse("512Mi"),
 						},
 					},
 				},
@@ -144,6 +157,12 @@ func main() {
 						EmptyDir: &corev1.EmptyDirVolumeSource{},
 					},
 				},
+				{
+					Name: "buildkit-socket",
+					VolumeSource: corev1.VolumeSource{
+						EmptyDir: &corev1.EmptyDirVolumeSource{},
+					},
+				},
 			},
 		},
 	}
@@ -153,12 +172,12 @@ func main() {
 	}
 
 	defer func() {
-		// Cleanup kaniko pod at end
+		// Cleanup buildkit pod at end
 		clientset.CoreV1().Pods(namespace).Delete(ctx, podName, metav1.DeleteOptions{})
 	}()
 
 	// 4. Watch & Wait for Pod Completion
-	fmt.Println("-> Waiting for Kaniko build to complete (this may take a minute)...")
+	fmt.Println("-> Waiting for BuildKit build to complete (this may take a minute)...")
 	watch, err := clientset.CoreV1().Pods(namespace).Watch(ctx, metav1.ListOptions{
 		FieldSelector: "metadata.name=" + podName,
 	})
@@ -174,13 +193,13 @@ func main() {
 		}
 		if p.Status.Phase == corev1.PodSucceeded {
 			buildSuccess = true
-			fmt.Println("-> Kaniko build SUCCEEDED!")
+			fmt.Println("-> BuildKit build SUCCEEDED!")
 			break
 		} else if p.Status.Phase == corev1.PodFailed {
-			fmt.Println("-> Kaniko build FAILED!")
+			fmt.Println("-> BuildKit build FAILED!")
 			cmd := exec.Command("kubectl", "logs", podName, "-n", namespace, "--all-containers")
 			out, _ := cmd.CombinedOutput()
-			fmt.Printf("Kaniko Logs:\n%s\n", string(out))
+			fmt.Printf("BuildKit Logs:\n%s\n", string(out))
 			break
 		}
 	}
